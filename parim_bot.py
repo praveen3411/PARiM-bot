@@ -27,18 +27,17 @@ def save_applied(applied):
 
 async def login(page):
     login_url = PARIM_URL.rstrip("/") + "/login"
-    log(f"Opening {login_url} ...")
+    log(f"Opening {login_url}")
     await page.goto(login_url, wait_until="networkidle", timeout=40000)
     await page.wait_for_timeout(3000)
 
-    email_sel = 'input[type="email"], input[name="email"], input[name="username"]'
-    email_input = await page.wait_for_selector(email_sel, timeout=15000)
+    email_input = await page.wait_for_selector(
+        'input[type="email"], input[name="email"], input[name="username"]', timeout=15000
+    )
     await email_input.fill(EMAIL)
     log("Email entered")
 
-    next_btn = await page.query_selector(
-        'button:has-text("Next"), button:has-text("Continue"), input[value="Next"]'
-    )
+    next_btn = await page.query_selector('button:has-text("Next"), button:has-text("Continue")')
     if next_btn:
         log("Clicking Next...")
         await next_btn.click()
@@ -46,7 +45,6 @@ async def login(page):
         try:
             first_item = await page.wait_for_selector('li, .team-item', timeout=5000)
             if first_item:
-                log("Clicking team...")
                 await first_item.click()
                 await page.wait_for_timeout(3000)
         except Exception:
@@ -71,7 +69,7 @@ async def login(page):
     log("Password entered")
 
     btn = await page.query_selector(
-        'button[type="submit"], button:has-text("Log in"), button:has-text("Sign in"), button:has-text("Login")'
+        'button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")'
     )
     if btn:
         await btn.click()
@@ -80,57 +78,67 @@ async def login(page):
 
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page.wait_for_timeout(4000)
-    log(f"After login URL: {page.url}")
 
     staff_url = PARIM_URL.rstrip("/") + "/staff"
     if "/staff" not in page.url:
-        log(f"Navigating to staff portal: {staff_url}")
         await page.goto(staff_url, wait_until="networkidle", timeout=20000)
         await page.wait_for_timeout(3000)
 
     await page.screenshot(path="screenshot_01_dashboard.png")
-    log(f"Dashboard loaded: {page.url}")
+    log(f"Logged in! URL: {page.url}")
 
 async def go_to_open_shifts(page):
-    log("Clicking Open Shifts in sidebar...")
+    log("Navigating to Open Shifts using JavaScript click...")
 
-    sidebar_sels = [
-        'a:has-text("Open Shifts")',
-        'a:has-text("Open shifts")',
-        'nav a:has-text("Open")',
-        'aside a:has-text("Open")',
-        'li:has-text("Open Shifts") a',
-        'li a:has-text("Open")',
-        '[class*="nav"] a:has-text("Open")',
-    ]
+    clicked = await page.evaluate("""
+        () => {
+            const allElements = document.querySelectorAll('a, li, div, span, button, nav *');
+            for (const el of allElements) {
+                const text = el.textContent.trim();
+                if (text === 'Open Shifts' || text === 'Open shifts') {
+                    el.click();
+                    return 'clicked: ' + el.tagName + ' - ' + el.className;
+                }
+            }
+            return 'not found';
+        }
+    """)
+    log(f"JS click result: {clicked}")
+    await page.wait_for_timeout(5000)
+    await page.screenshot(path="screenshot_02_after_nav.png")
+    log(f"URL after nav: {page.url}")
 
-    for sel in sidebar_sels:
+    content = await page.content()
+    if "Apply" in content or "Available" in content or "open" in page.url.lower():
+        log("Open Shifts page loaded!")
+        return True
+
+    log("Trying direct URL navigation...")
+    for path in ["/staff/open-shifts", "/staff#open-shifts", "/open-shifts"]:
         try:
-            el = await page.wait_for_selector(sel, timeout=5000)
-            if el:
-                log(f"Found: {sel} — clicking...")
-                await el.click()
-                await page.wait_for_timeout(5000)
-                await page.screenshot(path="screenshot_02_open_shifts.png")
-                log(f"Open Shifts loaded: {page.url}")
+            url = PARIM_URL.rstrip("/") + path
+            await page.goto(url, wait_until="networkidle", timeout=10000)
+            await page.wait_for_timeout(3000)
+            content = await page.content()
+            if "Apply" in content or "Available" in content:
+                log(f"Found shifts at {url}")
+                await page.screenshot(path="screenshot_02_after_nav.png")
                 return True
         except Exception:
-            continue
+            pass
 
-    log("Could not find Open Shifts sidebar link")
-    await page.screenshot(path="screenshot_02_open_shifts.png")
+    await page.screenshot(path="screenshot_02_after_nav.png")
     return False
 
 async def apply_for_shifts(page, applied):
     count = 0
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(2000)
 
     apply_btns = await page.query_selector_all('button:has-text("Apply")')
     log(f"Found {len(apply_btns)} Apply button(s)")
 
     if not apply_btns:
-        await page.screenshot(path="screenshot_03_no_shifts.png")
-        log("No Apply buttons found - no new shifts available")
+        log("No Apply buttons found")
         return 0
 
     for i, btn in enumerate(apply_btns):
@@ -148,14 +156,14 @@ async def apply_for_shifts(page, applied):
 
             shift_id = text[:200]
             if shift_id in applied:
-                log(f"Already applied - skipping shift {i+1}")
+                log(f"Already applied - skipping")
                 continue
 
             log(f"Applying shift {i+1}: {text[:80]}...")
             await btn.scroll_into_view_if_needed()
             await btn.click()
             await page.wait_for_timeout(3000)
-            await page.screenshot(path=f"screenshot_04_modal_{i}.png")
+            await page.screenshot(path=f"screenshot_03_modal_{i}.png")
 
             confirmed = False
             for confirm_sel in [
@@ -167,10 +175,9 @@ async def apply_for_shifts(page, applied):
                 'button.btn-primary',
             ]:
                 try:
-                    modal_btn = await page.wait_for_selector(confirm_sel, timeout=3000)
-                    if modal_btn and await modal_btn.is_visible():
-                        log("Confirming in modal...")
-                        await modal_btn.click()
+                    mb = await page.wait_for_selector(confirm_sel, timeout=3000)
+                    if mb and await mb.is_visible():
+                        await mb.click()
                         await page.wait_for_timeout(3000)
                         confirmed = True
                         break
@@ -178,22 +185,27 @@ async def apply_for_shifts(page, applied):
                     continue
 
             if not confirmed:
-                all_btns = await page.query_selector_all('button:has-text("Apply")')
-                for ab in all_btns:
-                    if await ab.is_visible():
-                        await ab.click()
-                        await page.wait_for_timeout(2000)
-                        confirmed = True
-                        break
+                confirmed = await page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('button');
+                        for (const b of btns) {
+                            if (b.textContent.trim() === 'Apply' && b.offsetParent !== null) {
+                                b.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if confirmed:
+                    await page.wait_for_timeout(2000)
 
             if confirmed:
                 applied.add(shift_id)
                 save_applied(applied)
                 count += 1
                 log(f"SUCCESS - Applied for shift {i+1}!")
-                await page.screenshot(path=f"screenshot_05_success_{i}.png")
-            else:
-                log(f"Could not confirm shift {i+1}")
+                await page.screenshot(path=f"screenshot_04_success_{i}.png")
 
         except Exception as e:
             log(f"Error on shift {i+1}: {e}")
