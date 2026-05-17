@@ -7,7 +7,7 @@ from pathlib import Path
 
 EMAIL = os.environ.get("PARIM_EMAIL", "")
 PASSWORD = os.environ.get("PARIM_PASSWORD", "")
-PARIM_URL = os.environ.get("PARIM_URL", "https://login.parim.co")
+PARIM_URL = os.environ.get("PARIM_URL", "https://swordsecurityhq.parim.co")
 APPLIED_FILE = Path("applied_shifts.json")
 
 def log(msg, icon="INFO"):
@@ -43,31 +43,33 @@ async def login(page):
     if next_btn:
         log("Two-step login - clicking Next...")
         await next_btn.click()
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(3000)
         await page.screenshot(path="screenshot_02_after_next.png")
-        log("After Next screenshot saved")
+
+        team_btn = await page.query_selector(
+            'li, .team-item, [class*="team"], [class*="Team"], div[role="button"]'
+        )
+        if team_btn:
+            log("Team selection found - clicking team...")
+            await team_btn.click()
+            await page.wait_for_timeout(3000)
+            await page.screenshot(path="screenshot_03_after_team.png")
     else:
         await email_input.press("Tab")
         await page.wait_for_timeout(1000)
 
     pw_input = None
-    pw_selectors = [
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[autocomplete="current-password"]',
-        'input[placeholder*="assword"]',
-    ]
-    for sel in pw_selectors:
+    for sel in ['input[type="password"]', 'input[name="password"]', 'input[autocomplete="current-password"]']:
         try:
-            pw_input = await page.wait_for_selector(sel, timeout=5000)
+            pw_input = await page.wait_for_selector(sel, timeout=8000)
             if pw_input:
-                log(f"Password field found")
+                log("Password field found")
                 break
         except Exception:
             continue
 
     if not pw_input:
-        await page.screenshot(path="screenshot_03_no_password.png")
+        await page.screenshot(path="screenshot_error_no_password.png")
         raise Exception("Could not find password field - check screenshots in Artifacts")
 
     await pw_input.fill(PASSWORD)
@@ -84,9 +86,10 @@ async def login(page):
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
     await page.screenshot(path="screenshot_04_after_login.png")
-    log("Login complete")
+    log("Login complete!")
 
 async def go_to_open_shifts(page):
+    await page.screenshot(path="screenshot_05_dashboard.png")
     selectors = [
         'a:has-text("Open Shifts")',
         'a:has-text("Open shifts")',
@@ -102,7 +105,7 @@ async def go_to_open_shifts(page):
             if el:
                 await el.click()
                 await page.wait_for_load_state("networkidle", timeout=12000)
-                await page.screenshot(path="screenshot_05_shifts_page.png")
+                await page.screenshot(path="screenshot_06_shifts_page.png")
                 log("On Open Shifts page")
                 return True
         except Exception:
@@ -112,13 +115,13 @@ async def go_to_open_shifts(page):
     for path in ["/shifts/open", "/open-shifts", "/shifts", "/employee/shifts"]:
         try:
             await page.goto(base + path, wait_until="networkidle", timeout=12000)
-            await page.screenshot(path="screenshot_05_shifts_page.png")
+            await page.screenshot(path="screenshot_06_shifts_page.png")
             log(f"Navigated to {base + path}")
             return True
         except Exception:
             pass
 
-    log("Could not reach Open Shifts page - WARNING")
+    log("Could not reach Open Shifts page")
     return False
 
 async def apply_for_shifts(page, applied):
@@ -145,10 +148,10 @@ async def apply_for_shifts(page, applied):
 
             shift_id = text[:200]
             if shift_id in applied:
-                log(f"Already applied - skipping")
+                log("Already applied - skipping")
                 continue
 
-            log(f"Applying for shift...")
+            log("Applying for shift...")
             await btn.scroll_into_view_if_needed()
             await btn.click()
             await page.wait_for_timeout(2000)
@@ -168,7 +171,7 @@ async def apply_for_shifts(page, applied):
             applied.add(shift_id)
             save_applied(applied)
             count += 1
-            log("Applied successfully! DONE")
+            log("Applied successfully!")
             await page.wait_for_timeout(1000)
 
         except Exception as e:
