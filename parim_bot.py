@@ -77,59 +77,68 @@ async def login(page):
     await page.wait_for_timeout(5000)
     log(f"Logged in! URL: {page.url}")
 
-async def go_to_open_shifts(page):
+async def load_open_shifts(page):
+    staff_url = PARIM_URL.rstrip("/") + "/staff"
+    log(f"Going to staff page: {staff_url}")
+    await page.goto(staff_url, wait_until="networkidle", timeout=30000)
+    await page.wait_for_timeout(3000)
+
+    await page.wait_for_selector('#monolith-iframe', timeout=15000)
+    log("Iframe found!")
+
     open_shifts_url = PARIM_URL.rstrip("/") + "/s/event/index"
-    log(f"Navigating directly to monolith Open Shifts: {open_shifts_url}")
-
-    await page.goto(open_shifts_url, wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(5000)
+    log(f"Setting iframe to Open Shifts: {open_shifts_url}")
+    await page.evaluate(f"""
+        document.getElementById('monolith-iframe').src = '{open_shifts_url}';
+    """)
+    await page.wait_for_timeout(8000)
     await page.screenshot(path="screenshot_01_open_shifts.png")
-
-    log(f"URL: {page.url}")
-    content = await page.inner_text("body")
-    log(f"Page has Apply: {'Apply' in content}")
-    log(f"Page has Available: {'Available' in content}")
-    log(f"Page has Open Shifts: {'Open Shifts' in content}")
-
-    return "Apply" in content or "Available" in content or "Open Shifts" in content
+    log("Open Shifts page loaded")
 
 async def apply_for_shifts(page, applied):
     count = 0
-    await page.wait_for_timeout(2000)
+    frame = page.frame_locator('#monolith-iframe')
 
-    apply_btns = await page.query_selector_all('button:has-text("Apply")')
-    log(f"Found {len(apply_btns)} Apply button(s)")
+    apply_locator = frame.locator('button:has-text("Apply")')
+    total = await apply_locator.count()
+    log(f"Found {total} Apply button(s) via frame_locator")
 
-    if not apply_btns:
-        log("No Apply buttons - no available shifts right now")
+    if total == 0:
+        log("No available shifts to apply for")
         return 0
 
-    for i, btn in enumerate(apply_btns):
+    for i in range(total):
         try:
-            if not await btn.is_visible() or not await btn.is_enabled():
+            btns = frame.locator('button:has-text("Apply")')
+            n = await btns.count()
+            if n == 0:
+                break
+
+            btn = btns.first
+            visible = await btn.is_visible()
+            if not visible:
+                log(f"Button {i+1} not visible, skipping")
                 continue
 
             try:
-                row = await btn.evaluate_handle(
-                    "el => el.closest('tr') || el.closest('[class*=row]') || el.parentElement.parentElement"
+                text = await btn.evaluate(
+                    "el => (el.closest('tr') || el.closest('[class*=row]') || el.parentElement?.parentElement)?.innerText || ''"
                 )
-                text = (await row.inner_text()).strip()
+                shift_id = text.strip()[:200]
             except Exception:
-                text = f"shift_{i}"
+                shift_id = f"shift_{i}"
 
-            shift_id = text[:200]
-            if shift_id in applied:
-                log(f"Already applied - skipping shift {i+1}")
+            if shift_id and shift_id in applied:
+                log(f"Already applied - skipping")
                 continue
 
-            log(f"Applying shift {i+1}: {text[:80]}...")
-            await btn.scroll_into_view_if_needed()
+            log(f"Clicking Apply for shift {i+1}...")
             await btn.click()
             await page.wait_for_timeout(3000)
-            await page.screenshot(path=f"screenshot_02_modal_{i}.png")
+            await page.screenshot(path=f"screenshot_0{i+2}_modal.png")
 
             confirmed = False
-            for confirm_sel in [
+            for modal_sel in [
                 '.modal button:has-text("Apply")',
                 '[role="dialog"] button:has-text("Apply")',
                 'dialog button:has-text("Apply")',
@@ -138,10 +147,10 @@ async def apply_for_shifts(page, applied):
                 'button.btn-primary',
             ]:
                 try:
-                    mb = await page.wait_for_selector(confirm_sel, timeout=3000)
-                    if mb and await mb.is_visible():
-                        log("Clicking confirm in modal...")
-                        await mb.click()
+                    modal_btn = frame.locator(modal_sel).first
+                    if await modal_btn.count() > 0 and await modal_btn.is_visible():
+                        log("Confirming in modal...")
+                        await modal_btn.click()
                         await page.wait_for_timeout(3000)
                         confirmed = True
                         break
@@ -149,25 +158,28 @@ async def apply_for_shifts(page, applied):
                     continue
 
             if not confirmed:
-                confirmed = await page.evaluate("""
-                    () => {
-                        const btns = Array.from(document.querySelectorAll('button'));
-                        const b = btns.find(b => b.textContent.trim() === 'Apply' && b.offsetParent !== null);
-                        if (b) { b.click(); return true; }
-                        return false;
-                    }
-                """)
-                if confirmed:
-                    await page.wait_for_timeout(2000)
+                new_btns = frame.locator('button:has-text("Apply")')
+                new_count = await new_btns.count()
+                if new_count > 0:
+                    for j in range(new_count):
+                        b = new_btns.nth(j)
+                        if await b.is_visible():
+                            await b.click()
+                            await page.wait_for_timeout(2000)
+                            confirmed = True
+                            break
 
             if confirmed:
-                applied.add(shift_id)
-                save_applied(applied)
+                if shift_id:
+                    applied.add(shift_id)
+                    save_applied(applied)
                 count += 1
                 log(f"SUCCESS - Applied for shift {i+1}!")
-                await page.screenshot(path=f"screenshot_03_success_{i}.png")
+                await page.screenshot(path=f"screenshot_success_{i+1}.png")
             else:
                 log(f"Could not confirm modal for shift {i+1}")
+
+            await page.wait_for_timeout(2000)
 
         except Exception as e:
             log(f"Error on shift {i+1}: {e}")
@@ -198,15 +210,12 @@ async def main():
 
         try:
             await login(page)
-            ok = await go_to_open_shifts(page)
-            if ok:
-                n = await apply_for_shifts(page, applied)
-                if n:
-                    log(f"SUCCESS - Applied for {n} new shift(s)!")
-                else:
-                    log("Run complete - no new shifts to apply for")
+            await load_open_shifts(page)
+            n = await apply_for_shifts(page, applied)
+            if n:
+                log(f"SUCCESS - Applied for {n} new shift(s)!")
             else:
-                log("Could not reach Open Shifts page")
+                log("Run complete - no new shifts to apply for")
         except Exception as e:
             log(f"Error: {e}")
             try:
