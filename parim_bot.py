@@ -1,5 +1,5 @@
 # “””
-PARiM Auto-Apply Bot — Cloud Version
+PARiM Auto-Apply Bot - Cloud Version
 
 Runs on GitHub Actions every 5 minutes.
 Credentials are stored securely as GitHub Secrets (never in the code).
@@ -63,11 +63,11 @@ next_btn = await page.query_selector(
     'button:has-text("next"), input[value="Next"]'
 )
 if next_btn:
-    log("Two-step login detected — clicking Next...")
+    log("Two-step login detected - clicking Next...")
     await next_btn.click()
     await page.wait_for_timeout(2000)
 else:
-    # Single page login — press Tab to move to password
+    # Single page login - press Tab to move to password
     await email_input.press("Tab")
     await page.wait_for_timeout(500)
 
@@ -150,7 +150,7 @@ apply_btns = await page.query_selector_all(
 )
 
 if not apply_btns:
-    log("No open shifts right now — nothing to apply for")
+    log("No open shifts right now - nothing to apply for")
     return 0
 
 log(f"Found {len(apply_btns)} open shift(s)!", "📋")
@@ -207,7 +207,7 @@ return count
 async def main():
 if not EMAIL or not PASSWORD:
 log(“PARIM_EMAIL or PARIM_PASSWORD not set in environment!”, “❌”)
-log(“Add them as GitHub Secrets — see README.md”)
+log(“Add them as GitHub Secrets - see README.md”)
 sys.exit(1)
 
 ```
@@ -245,7 +245,7 @@ async with async_playwright() as p:
             if n:
                 log(f"✅ Applied for {n} new shift(s) this run!", "🎉")
             else:
-                log("Run complete — no new shifts this time")
+                log("Run complete - no new shifts this time")
     except Exception as e:
         log(f"Error: {e}", "❌")
         # Save a screenshot for debugging
