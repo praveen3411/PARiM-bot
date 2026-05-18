@@ -27,15 +27,15 @@ def save_applied(applied):
 
 async def login(page):
     login_url = PARIM_URL.rstrip("/") + "/login"
-    log(f"Opening {login_url}")
+    log(f"Step 1: Opening {login_url}")
     await page.goto(login_url, wait_until="networkidle", timeout=40000)
     await page.wait_for_timeout(3000)
 
     email_input = await page.wait_for_selector(
-        'input[type="email"], input[name="email"], input[name="username"]',
-        timeout=15000
+        'input[type="email"], input[name="email"], input[name="username"]', timeout=15000
     )
     await email_input.fill(EMAIL)
+    log("Step 2: Email entered")
 
     next_btn = await page.query_selector('button:has-text("Next"), button:has-text("Continue")')
     if next_btn:
@@ -48,9 +48,6 @@ async def login(page):
                 await page.wait_for_timeout(3000)
         except Exception:
             pass
-    else:
-        await email_input.press("Tab")
-        await page.wait_for_timeout(1000)
 
     pw_input = None
     for sel in ['input[type="password"]', 'input[name="password"]']:
@@ -65,10 +62,9 @@ async def login(page):
         raise Exception("Could not find password field")
 
     await pw_input.fill(PASSWORD)
+    log("Step 3: Password entered")
 
-    btn = await page.query_selector(
-        'button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")'
-    )
+    btn = await page.query_selector('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")')
     if btn:
         await btn.click()
     else:
@@ -76,179 +72,113 @@ async def login(page):
 
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page.wait_for_timeout(5000)
-    log(f"Logged in! URL: {page.url}")
+    log(f"Step 4: Logged in! URL={page.url}")
 
-async def navigate_to_open_shifts(page):
+async def get_open_shifts_frame(page):
     staff_url = PARIM_URL.rstrip("/") + "/staff"
-    log(f"Loading staff page: {staff_url}")
+    log(f"Step 5: Loading {staff_url}")
     await page.goto(staff_url, wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(4000)
+    await page.wait_for_timeout(5000)
+
+    log(f"Step 6: Current frames: {[f.url for f in page.frames]}")
 
     open_shifts_url = PARIM_URL.rstrip("/") + "/s/event/index"
-    log(f"Navigating iframe to: {open_shifts_url}")
-    await page.evaluate(f"""
-        () => {{
-            const iframe = document.getElementById('monolith-iframe');
-            if (iframe) {{
-                iframe.src = '{open_shifts_url}';
-            }}
-        }}
-    """)
+    log(f"Step 7: Setting iframe src to {open_shifts_url}")
+    await page.evaluate(f"document.getElementById('monolith-iframe').src = '{open_shifts_url}';")
 
-    log("Waiting 15 seconds for Open Shifts to load...")
-    await page.wait_for_timeout(15000)
-    await page.screenshot(path="screenshot_01_open_shifts.png")
-    log("Open Shifts page ready")
+    log("Step 8: Waiting for event frame to load (up to 20s)...")
+    event_frame = None
+    for i in range(20):
+        await asyncio.sleep(1)
+        frames = page.frames
+        for f in frames:
+            if "event" in f.url or "event" in f.url.lower():
+                event_frame = f
+                log(f"Found event frame at attempt {i+1}: {f.url}")
+                break
+        if event_frame:
+            break
+        if i % 5 == 0:
+            log(f"  Still waiting... frames: {[f.url for f in page.frames]}")
 
-async def get_apply_buttons(page):
-    result = await page.evaluate("""
-        () => {
-            try {
-                const iframe = document.getElementById('monolith-iframe');
-                if (!iframe) return {error: 'no iframe', count: 0, shifts: []};
-                const doc = iframe.contentDocument || iframe.contentWindow.document;
-                if (!doc) return {error: 'no contentDocument', count: 0, shifts: []};
+    if not event_frame:
+        log("Event frame not found by URL - using frames[-1]")
+        log(f"All frames: {[f.url for f in page.frames]}")
+        if len(page.frames) > 1:
+            event_frame = page.frames[-1]
+            log(f"Using frame: {event_frame.url}")
 
-                const allBtns = Array.from(doc.querySelectorAll('button'));
-                const applyBtns = allBtns.filter(b =>
-                    b.textContent.trim() === 'Apply' && b.offsetParent !== null
-                );
+    await page.screenshot(path="screenshot_01_state.png")
+    return event_frame
 
-                const shifts = applyBtns.map((btn, i) => {
-                    const row = btn.closest('tr') ||
-                                btn.closest('[class*="row"]') ||
-                                btn.parentElement?.parentElement;
-                    return {
-                        index: i,
-                        text: (row ? row.innerText : btn.innerText).trim().substring(0, 200)
-                    };
-                });
-
-                return {error: null, count: applyBtns.length, shifts: shifts};
-            } catch(e) {
-                return {error: e.message, count: 0, shifts: []};
-            }
-        }
-    """)
-    return result
-
-async def click_apply_button(page, index):
-    return await page.evaluate(f"""
-        () => {{
-            try {{
-                const iframe = document.getElementById('monolith-iframe');
-                const doc = iframe.contentDocument || iframe.contentWindow.document;
-                const allBtns = Array.from(doc.querySelectorAll('button'));
-                const applyBtns = allBtns.filter(b =>
-                    b.textContent.trim() === 'Apply' && b.offsetParent !== null
-                );
-                if (applyBtns[{index}]) {{
-                    applyBtns[{index}].click();
-                    return 'clicked';
-                }}
-                return 'not found at index {index}';
-            }} catch(e) {{
-                return 'error: ' + e.message;
-            }}
-        }}
-    """)
-
-async def click_modal_apply(page):
-    return await page.evaluate("""
-        () => {
-            try {
-                const iframe = document.getElementById('monolith-iframe');
-                const doc = iframe.contentDocument || iframe.contentWindow.document;
-
-                const selectors = [
-                    '.modal-footer .btn-success',
-                    '.modal-footer button:last-child',
-                    '.modal button.btn-success',
-                    '.modal button.btn-primary',
-                    '[class*="modal"] button.btn-success',
-                ];
-
-                for (const sel of selectors) {
-                    const btn = doc.querySelector(sel);
-                    if (btn && btn.offsetParent !== null) {
-                        btn.click();
-                        return 'clicked via ' + sel;
-                    }
-                }
-
-                const allBtns = Array.from(doc.querySelectorAll('button'));
-                const modal = doc.querySelector('.modal.in, .modal[style*="display: block"], .modal[style*="display:block"]');
-                if (modal) {
-                    const modalBtns = Array.from(modal.querySelectorAll('button'));
-                    const applyBtn = modalBtns.find(b => b.textContent.trim() === 'Apply');
-                    if (applyBtn) {
-                        applyBtn.click();
-                        return 'clicked via modal search';
-                    }
-                }
-
-                const visibleApply = allBtns.find(b =>
-                    b.textContent.trim() === 'Apply' && b.offsetParent !== null
-                );
-                if (visibleApply) {
-                    visibleApply.click();
-                    return 'clicked via visible button';
-                }
-
-                return 'no modal apply button found';
-            } catch(e) {
-                return 'error: ' + e.message;
-            }
-        }
-    """)
-
-async def apply_for_shifts(page, applied):
+async def apply_via_frame(frame, page, applied):
     count = 0
+    log(f"Step 9: Querying Apply buttons in frame {frame.url}")
+    await asyncio.sleep(5)
 
-    info = await get_apply_buttons(page)
-    log(f"Iframe status: error={info.get('error')}, Apply buttons={info.get('count')}")
+    apply_btns = await frame.query_selector_all('button:has-text("Apply")')
+    log(f"Step 10: Found {len(apply_btns)} Apply buttons in frame")
 
-    if info.get('count', 0) == 0:
-        log("No Apply buttons found - no new shifts available")
+    if not apply_btns:
+        html_snippet = await frame.evaluate("document.body.innerHTML.substring(0, 500)")
+        log(f"Frame body snippet: {html_snippet}")
         return 0
 
-    shifts = info.get('shifts', [])
-    log(f"Shifts to apply: {len(shifts)}")
+    for i, btn in enumerate(apply_btns):
+        try:
+            visible = await btn.is_visible()
+            log(f"Button {i+1}: visible={visible}")
+            if not visible:
+                continue
 
-    for i, shift in enumerate(shifts):
-        shift_id = shift['text']
-        shift_idx = shift['index']
+            try:
+                row = await btn.evaluate_handle(
+                    "el => el.closest('tr') || el.closest('[class*=row]') || el.parentElement?.parentElement"
+                )
+                text = (await row.inner_text()).strip()
+            except Exception:
+                text = f"shift_{i}"
 
-        if shift_id in applied:
-            log(f"Already applied to this shift - skipping")
-            continue
+            shift_id = text[:200]
+            if shift_id in applied:
+                log(f"Already applied - skipping")
+                continue
 
-        log(f"Applying for shift {i+1}: {shift_id[:80]}...")
+            log(f"Step 11: Clicking Apply for: {text[:80]}...")
+            await btn.click()
+            await asyncio.sleep(3)
+            await page.screenshot(path=f"screenshot_02_modal_{i}.png")
 
-        result = await click_apply_button(page, shift_idx)
-        log(f"Click result: {result}")
+            confirmed = False
+            for sel in [
+                '.modal-footer .btn-success',
+                '.modal-footer button:last-child',
+                '.modal button.btn-success',
+                '[role="dialog"] button:has-text("Apply")',
+                '.modal button:has-text("Apply")',
+            ]:
+                try:
+                    mb = await frame.query_selector(sel)
+                    if mb and await mb.is_visible():
+                        log(f"Clicking modal confirm via: {sel}")
+                        await mb.click()
+                        await asyncio.sleep(3)
+                        confirmed = True
+                        break
+                except Exception:
+                    continue
 
-        if result != 'clicked':
-            log(f"Could not click Apply button")
-            continue
+            if confirmed:
+                applied.add(shift_id)
+                save_applied(applied)
+                count += 1
+                log(f"SUCCESS! Applied for shift {i+1}!")
+                await page.screenshot(path=f"screenshot_03_success_{i}.png")
+            else:
+                log(f"Could not find confirm button for shift {i+1}")
 
-        await page.wait_for_timeout(3000)
-        await page.screenshot(path=f"screenshot_0{i+2}_after_click.png")
-
-        confirm_result = await click_modal_apply(page)
-        log(f"Modal confirm result: {confirm_result}")
-        await page.wait_for_timeout(3000)
-
-        if 'clicked' in confirm_result:
-            applied.add(shift_id)
-            save_applied(applied)
-            count += 1
-            log(f"SUCCESS! Applied for shift {i+1}!")
-            await page.screenshot(path=f"screenshot_success_{i+1}.png")
-        else:
-            log(f"Modal confirm failed: {confirm_result}")
-
-        await page.wait_for_timeout(2000)
+        except Exception as e:
+            log(f"Error on shift {i+1}: {e}")
 
     return count
 
@@ -257,7 +187,7 @@ async def main():
         log("PARIM_EMAIL or PARIM_PASSWORD not set!")
         sys.exit(1)
 
-    log("PARiM Auto-Apply Bot - Starting")
+    log("=== PARiM Auto-Apply Bot Starting ===")
     applied = load_applied()
     log(f"History: {len(applied)} previously applied shifts")
 
@@ -266,7 +196,8 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                  "--disable-web-security", "--allow-running-insecure-content"]
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -276,14 +207,21 @@ async def main():
 
         try:
             await login(page)
-            await navigate_to_open_shifts(page)
-            n = await apply_for_shifts(page, applied)
-            if n:
-                log(f"SUCCESS - Applied for {n} new shift(s) this run!")
+            frame = await get_open_shifts_frame(page)
+
+            if frame:
+                n = await apply_via_frame(frame, page, applied)
+                if n:
+                    log(f"=== SUCCESS: Applied for {n} shift(s)! ===")
+                else:
+                    log("=== Done: No new shifts to apply for ===")
             else:
-                log("Run complete - no new shifts to apply for")
+                log("=== ERROR: Could not find Open Shifts frame ===")
+
         except Exception as e:
-            log(f"Error: {e}")
+            log(f"=== FATAL ERROR: {e} ===")
+            import traceback
+            log(traceback.format_exc())
             try:
                 await page.screenshot(path="screenshot_error.png")
             except Exception:
