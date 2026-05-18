@@ -93,7 +93,6 @@ async def main():
         try:
             await login(page)
 
-            # Already on /staff after login
             if "/staff" not in page.url:
                 await page.goto(PARIM_URL + "/staff", wait_until="load", timeout=30000)
             await page.wait_for_timeout(6000)
@@ -106,12 +105,11 @@ async def main():
                     break
             if not mf and len(page.frames) > 1:
                 mf = page.frames[1]
-
             if not mf:
                 raise Exception("Monolith frame not found")
             log(f"Frame: {mf.url}")
 
-            # Navigate to Open Shifts page
+            # Navigate to Open Shifts
             await mf.goto(PARIM_URL + "/s/event/index", wait_until="load", timeout=20000)
             await asyncio.sleep(8)
             log(f"Open Shifts loaded: {mf.url}")
@@ -119,106 +117,88 @@ async def main():
 
             total = 0
 
-            # Keep applying until no more available shifts
-            for attempt in range(30):
-                # Find ALL visible Apply buttons using exact class from DevTools
-                # Apply button HTML: <a class="apply btn btn-xs btn-success fr" href="/s/event/#">Apply</a>
-                apply_info = await mf.evaluate("""
-                    () => {
-                        const btns = Array.from(document.querySelectorAll('a.apply'));
-                        const visible = btns.filter(a => a.offsetParent !== null);
-                        return {
-                            count: visible.length,
-                            shifts: visible.map((a, i) => {
-                                const row = a.closest('.venue-wrap') ||
-                                            a.closest('.event-list-shift-row') ||
-                                            a.closest('.row') ||
-                                            a.parentElement;
-                                const shiftId = a.getAttribute('data-shift-id') ||
-                                               row?.getAttribute('data-shift-id') ||
-                                               a.getAttribute('data-team-id') + '_' + i;
-                                return {
-                                    index: i,
-                                    shiftId: shiftId || ('shift_' + i),
-                                    label: row ? row.innerText.trim().substring(0, 80) : ('shift_' + i)
-                                };
-                            })
-                        };
-                    }
-                """)
+            for attempt in range(20):
+                # Find visible Apply buttons using Playwright locator (NOT JavaScript click)
+                apply_locator = mf.locator('a.apply:visible')
+                count = await apply_locator.count()
+                log(f"Attempt {attempt+1}: {count} available shift(s)")
 
-                available = apply_info.get('shifts', [])
-                log(f"Attempt {attempt+1}: {len(available)} available shift(s)")
-
-                if not available:
+                if count == 0:
                     log("No more available shifts")
                     break
 
-                # Apply for the first not-yet-applied shift
-                applied_one = False
-                for shift in available:
-                    sid = shift['shiftId']
-                    if sid in applied:
-                        log(f"Already applied: {sid}")
-                        continue
+                # Get shift info for tracking
+                try:
+                    first_btn = apply_locator.first
+                    shift_label = await first_btn.evaluate(
+                        "el => (el.closest('.venue-wrap') || el.closest('.row') || el.parentElement)?.innerText?.trim()?.substring(0,80) || 'shift'"
+                    )
+                    shift_id = await first_btn.get_attribute('data-shift-id') or \
+                               await first_btn.get_attribute('data-team-id') or \
+                               shift_label[:50]
+                except Exception:
+                    shift_label = f"shift_{attempt}"
+                    shift_id = shift_label
 
-                    log(f"Applying: {shift['label'][:60]}")
-
-                    # Click the Apply button (a.apply)
-                    click_result = await mf.evaluate("""
-                        () => {
-                            const btn = document.querySelector('a.apply');
-                            if (btn && btn.offsetParent) {
-                                btn.click();
-                                return 'clicked: ' + btn.className;
-                            }
-                            return 'not found';
-                        }
-                    """)
-                    log(f"Click: {click_result}")
-
-                    if 'clicked' not in click_result:
-                        continue
-
-                    await asyncio.sleep(3)
-                    await page.screenshot(path=f"screenshot_modal_{attempt}.png")
-
-                    # Confirm via modal OK button
-                    # Modal HTML: <a class="btn btn-success fr" id="ok-btn" href="#">Apply</a>
-                    confirm_result = await mf.evaluate("""
-                        () => {
-                            // Exact id from DevTools
-                            const okBtn = document.getElementById('ok-btn');
-                            if (okBtn && okBtn.offsetParent !== null) {
-                                okBtn.click();
-                                return 'confirmed via #ok-btn';
-                            }
-                            // Fallback: any visible btn-success not in the shift list
-                            const fallback = document.querySelector('.ui-dialog-buttons .btn-success, .modal-footer .btn-success');
-                            if (fallback && fallback.offsetParent !== null) {
-                                fallback.click();
-                                return 'confirmed via dialog buttons';
-                            }
-                            return 'modal not found';
-                        }
-                    """)
-                    log(f"Confirm: {confirm_result}")
-                    await asyncio.sleep(4)
-
-                    if 'confirmed' in confirm_result:
-                        applied.add(sid)
-                        save_applied(applied)
-                        total += 1
-                        applied_one = True
-                        log(f"SUCCESS! Applied for: {shift['label'][:60]}")
-                        await page.screenshot(path=f"screenshot_done_{total}.png")
-                        break
-                    else:
-                        log("Modal not confirmed - trying next shift")
-
-                if not applied_one:
-                    log("Could not apply for any remaining shift - stopping")
+                if shift_id in applied:
+                    log(f"Already applied: {shift_id} - skipping")
+                    # Try next one - remove from visible list somehow
+                    # Just break to avoid infinite loop
                     break
+
+                log(f"Applying: {shift_label[:60]}")
+
+                # Use Playwright's proper click - triggers jQuery AJAX handlers
+                try:
+                    await first_btn.scroll_into_view_if_needed()
+                    await first_btn.click()
+                    log("Apply button clicked via Playwright")
+                except Exception as e:
+                    log(f"Click failed: {e}")
+                    continue
+
+                await asyncio.sleep(3)
+                await page.screenshot(path=f"screenshot_02_modal_{attempt}.png")
+
+                # Wait for modal ok-btn to become visible and click it
+                try:
+                    ok_btn = mf.locator('a#ok-btn:visible')
+                    ok_count = await ok_btn.count()
+                    log(f"ok-btn visible: {ok_count}")
+
+                    if ok_count > 0:
+                        await ok_btn.first.click()
+                        log("ok-btn clicked via Playwright")
+                        await asyncio.sleep(4)
+
+                        # Verify the shift is now Submitted (Apply button gone)
+                        new_count = await mf.locator('a.apply:visible').count()
+                        log(f"Apply buttons after submit: {new_count}")
+
+                        if new_count < count:
+                            applied.add(shift_id)
+                            save_applied(applied)
+                            total += 1
+                            log(f"SUCCESS! Shift submitted! ({count} -> {new_count} remaining)")
+                            await page.screenshot(path=f"screenshot_done_{total}.png")
+                        else:
+                            log("Button count unchanged - submission may have failed")
+                            # Still track to avoid retrying
+                            applied.add(shift_id)
+                            save_applied(applied)
+                    else:
+                        log("ok-btn not visible - modal may not have opened")
+                        # Dismiss any dialog and continue
+                        try:
+                            cancel = mf.locator('#no-btn:visible')
+                            if await cancel.count() > 0:
+                                await cancel.first.click()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+
+                except Exception as e:
+                    log(f"Modal error: {e}")
 
                 await asyncio.sleep(2)
 
