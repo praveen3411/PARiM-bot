@@ -58,7 +58,9 @@ async def login(page):
         raise Exception("Password field not found")
 
     await pw_input.fill(PASSWORD)
-    btn = await page.query_selector('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")')
+    btn = await page.query_selector(
+        'button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")'
+    )
     if btn:
         await btn.click()
     else:
@@ -68,118 +70,14 @@ async def login(page):
     await page.wait_for_timeout(5000)
     log(f"Logged in! URL={page.url}")
 
-async def find_apply_elements(frame):
-    """Find Apply elements - could be <a>, <button>, or <input>"""
-    # Log what selectors find
-    results = await frame.evaluate("""
-        () => {
-            const selectors = [
-                'button:contains("Apply")',
-                'a.btn',
-                '.btn-success',
-                '.btn-primary',
-                'a[href*="apply"]',
-                'a[href*="application"]',
-                'input[value="Apply"]',
-            ];
-            const allElements = Array.from(document.querySelectorAll('a, button, input[type=button], input[type=submit]'));
-            const withApply = allElements.filter(el => {
-                const text = el.textContent || el.value || '';
-                return text.trim().toLowerCase() === 'apply';
-            });
-            return {
-                totalLinks: document.querySelectorAll('a').length,
-                totalButtons: document.querySelectorAll('button').length,
-                applyElements: withApply.map(el => ({
-                    tag: el.tagName,
-                    text: el.textContent || el.value,
-                    href: el.href || '',
-                    classes: el.className,
-                    visible: el.offsetParent !== null
-                }))
-            };
-        }
-    """)
-    return results
-
-async def click_apply_and_confirm(frame, page, i, text, applied):
-    """Click an Apply element and confirm the modal"""
-    # Click the Apply element
-    clicked = await frame.evaluate(f"""
-        () => {{
-            const allElements = Array.from(document.querySelectorAll('a, button, input[type=button], input[type=submit]'));
-            const applyEls = allElements.filter(el => {{
-                const txt = el.textContent || el.value || '';
-                return txt.trim().toLowerCase() === 'apply' && el.offsetParent;
-            }});
-            if (applyEls[{i}]) {{
-                applyEls[{i}].click();
-                return 'clicked ' + applyEls[{i}].tagName + ' ' + applyEls[{i}].className;
-            }}
-            return 'not found at index {i}';
-        }}
-    """)
-    log(f"  Click result: {clicked}")
-
-    if 'clicked' not in clicked:
-        return False
-
-    await asyncio.sleep(3)
-    await page.screenshot(path=f"screenshot_modal_{i}.png")
-
-    # Confirm the modal - try multiple selectors
-    confirmed = await frame.evaluate("""
-        () => {
-            // Look for modal confirm button
-            const modalSelectors = [
-                '.modal-footer .btn-success',
-                '.modal-footer a.btn-success',
-                '.modal-footer button.btn-success',
-                '.modal .btn-success',
-                '.modal a:last-child',
-                '.modal button:last-child',
-                '[data-dismiss="modal"] ~ a',
-                '.modal-footer a:last-child',
-            ];
-            for (const sel of modalSelectors) {
-                const btn = document.querySelector(sel);
-                if (btn && btn.offsetParent !== null) {
-                    btn.click();
-                    return 'confirmed via ' + sel;
-                }
-            }
-            // Fallback: find any visible element with Apply text in modal area
-            const modal = document.querySelector('.modal.in, .modal[style*="block"], .modal[aria-hidden="false"]');
-            if (modal) {
-                const els = Array.from(modal.querySelectorAll('a, button'));
-                const applyEl = els.find(el => (el.textContent || '').trim().toLowerCase() === 'apply' && el.offsetParent);
-                if (applyEl) { applyEl.click(); return 'confirmed via modal search'; }
-            }
-            // Last resort: any visible Apply element
-            const all = Array.from(document.querySelectorAll('a, button'));
-            const visible = all.find(el => (el.textContent || '').trim().toLowerCase() === 'apply' && el.offsetParent);
-            if (visible) { visible.click(); return 'confirmed via visible'; }
-            return 'not found';
-        }
-    """)
-    log(f"  Confirm result: {confirmed}")
-
-    await asyncio.sleep(3)
-    if 'confirmed' in confirmed:
-        applied.add(text)
-        save_applied(applied)
-        await page.screenshot(path=f"screenshot_done_{i}.png")
-        return True
-    return False
-
 async def main():
     if not EMAIL or not PASSWORD:
         log("Secrets not set!")
         sys.exit(1)
 
-    log("=== PARiM Bot Starting ===")
+    log("=== PARiM Auto-Apply Bot ===")
     applied = load_applied()
-    log(f"History: {len(applied)} shifts")
+    log(f"Previously applied: {len(applied)} shifts")
 
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
@@ -195,11 +93,10 @@ async def main():
         try:
             await login(page)
 
-            # Already on /staff after login - just wait
+            # Already on /staff after login
             if "/staff" not in page.url:
                 await page.goto(PARIM_URL + "/staff", wait_until="load", timeout=30000)
             await page.wait_for_timeout(6000)
-            log(f"Staff page. Frames: {[f.url for f in page.frames]}")
 
             # Find monolith frame
             mf = None
@@ -209,46 +106,126 @@ async def main():
                     break
             if not mf and len(page.frames) > 1:
                 mf = page.frames[1]
-            log(f"Monolith frame: {mf.url if mf else 'NOT FOUND'}")
 
             if not mf:
-                raise Exception("No monolith frame found")
+                raise Exception("Monolith frame not found")
+            log(f"Frame: {mf.url}")
 
-            # Navigate frame to Open Shifts
-            log("Navigating frame to Open Shifts...")
+            # Navigate to Open Shifts page
             await mf.goto(PARIM_URL + "/s/event/index", wait_until="load", timeout=20000)
-            await asyncio.sleep(8)  # Wait for AJAX/SPA to render
-            log(f"Frame URL: {mf.url}")
+            await asyncio.sleep(8)
+            log(f"Open Shifts loaded: {mf.url}")
             await page.screenshot(path="screenshot_01_open_shifts.png")
 
-            # Diagnose what Apply elements exist
-            info = await find_apply_elements(mf)
-            log(f"Links: {info['totalLinks']}, Buttons: {info['totalButtons']}")
-            log(f"Apply elements found: {info['applyElements']}")
-
             total = 0
-            apply_els = [el for el in info['applyElements'] if el.get('visible')]
-            log(f"Visible Apply elements: {len(apply_els)}")
 
-            for i, el_info in enumerate(apply_els):
-                shift_text = f"apply_{i}_{el_info.get('href', '')}"
-                if shift_text in applied:
-                    log(f"Shift {i+1} already applied")
-                    continue
-                log(f"Applying shift {i+1}: tag={el_info['tag']} class={el_info['classes'][:40]}")
-                success = await click_apply_and_confirm(mf, page, i, shift_text, applied)
-                if success:
-                    total += 1
-                    log(f"SUCCESS! Applied shift {i+1}!")
-                # Re-query after each apply since DOM changes
+            # Keep applying until no more available shifts
+            for attempt in range(30):
+                # Find ALL visible Apply buttons using exact class from DevTools
+                # Apply button HTML: <a class="apply btn btn-xs btn-success fr" href="/s/event/#">Apply</a>
+                apply_info = await mf.evaluate("""
+                    () => {
+                        const btns = Array.from(document.querySelectorAll('a.apply'));
+                        const visible = btns.filter(a => a.offsetParent !== null);
+                        return {
+                            count: visible.length,
+                            shifts: visible.map((a, i) => {
+                                const row = a.closest('.venue-wrap') ||
+                                            a.closest('.event-list-shift-row') ||
+                                            a.closest('.row') ||
+                                            a.parentElement;
+                                const shiftId = a.getAttribute('data-shift-id') ||
+                                               row?.getAttribute('data-shift-id') ||
+                                               a.getAttribute('data-team-id') + '_' + i;
+                                return {
+                                    index: i,
+                                    shiftId: shiftId || ('shift_' + i),
+                                    label: row ? row.innerText.trim().substring(0, 80) : ('shift_' + i)
+                                };
+                            })
+                        };
+                    }
+                """)
+
+                available = apply_info.get('shifts', [])
+                log(f"Attempt {attempt+1}: {len(available)} available shift(s)")
+
+                if not available:
+                    log("No more available shifts")
+                    break
+
+                # Apply for the first not-yet-applied shift
+                applied_one = False
+                for shift in available:
+                    sid = shift['shiftId']
+                    if sid in applied:
+                        log(f"Already applied: {sid}")
+                        continue
+
+                    log(f"Applying: {shift['label'][:60]}")
+
+                    # Click the Apply button (a.apply)
+                    click_result = await mf.evaluate("""
+                        () => {
+                            const btn = document.querySelector('a.apply');
+                            if (btn && btn.offsetParent) {
+                                btn.click();
+                                return 'clicked: ' + btn.className;
+                            }
+                            return 'not found';
+                        }
+                    """)
+                    log(f"Click: {click_result}")
+
+                    if 'clicked' not in click_result:
+                        continue
+
+                    await asyncio.sleep(3)
+                    await page.screenshot(path=f"screenshot_modal_{attempt}.png")
+
+                    # Confirm via modal OK button
+                    # Modal HTML: <a class="btn btn-success fr" id="ok-btn" href="#">Apply</a>
+                    confirm_result = await mf.evaluate("""
+                        () => {
+                            // Exact id from DevTools
+                            const okBtn = document.getElementById('ok-btn');
+                            if (okBtn && okBtn.offsetParent !== null) {
+                                okBtn.click();
+                                return 'confirmed via #ok-btn';
+                            }
+                            // Fallback: any visible btn-success not in the shift list
+                            const fallback = document.querySelector('.ui-dialog-buttons .btn-success, .modal-footer .btn-success');
+                            if (fallback && fallback.offsetParent !== null) {
+                                fallback.click();
+                                return 'confirmed via dialog buttons';
+                            }
+                            return 'modal not found';
+                        }
+                    """)
+                    log(f"Confirm: {confirm_result}")
+                    await asyncio.sleep(4)
+
+                    if 'confirmed' in confirm_result:
+                        applied.add(sid)
+                        save_applied(applied)
+                        total += 1
+                        applied_one = True
+                        log(f"SUCCESS! Applied for: {shift['label'][:60]}")
+                        await page.screenshot(path=f"screenshot_done_{total}.png")
+                        break
+                    else:
+                        log("Modal not confirmed - trying next shift")
+
+                if not applied_one:
+                    log("Could not apply for any remaining shift - stopping")
+                    break
+
                 await asyncio.sleep(2)
-                info = await find_apply_elements(mf)
-                apply_els = [el for el in info['applyElements'] if el.get('visible')]
 
-            log(f"=== Done. Applied for {total} shift(s) ===")
+            log(f"=== Applied for {total} new shift(s) this run ===")
 
         except Exception as e:
-            log(f"=== FATAL: {e} ===")
+            log(f"ERROR: {e}")
             import traceback
             log(traceback.format_exc())
             try:
