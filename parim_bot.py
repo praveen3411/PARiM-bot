@@ -26,7 +26,7 @@ def save_applied(applied):
     APPLIED_FILE.write_text(json.dumps(sorted(applied)))
 
 async def login(page):
-    log(f"STEP 1 - Login at {PARIM_URL}/login")
+    log(f"LOGIN - {PARIM_URL}/login")
     await page.goto(PARIM_URL + "/login", wait_until="networkidle", timeout=40000)
     await page.wait_for_timeout(3000)
 
@@ -34,7 +34,6 @@ async def login(page):
         'input[type="email"], input[name="email"], input[name="username"]', timeout=15000
     )
     await email_input.fill(EMAIL)
-    log("STEP 2 - Email filled")
 
     next_btn = await page.query_selector('button:has-text("Next"), button:has-text("Continue")')
     if next_btn:
@@ -52,15 +51,13 @@ async def login(page):
     for sel in ['input[type="password"]', 'input[name="password"]']:
         try:
             pw_input = await page.wait_for_selector(sel, timeout=8000)
-            if pw_input:
-                break
+            if pw_input: break
         except Exception:
             continue
     if not pw_input:
         raise Exception("Password field not found")
 
     await pw_input.fill(PASSWORD)
-    log("STEP 3 - Password filled")
 
     btn = await page.query_selector('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")')
     if btn:
@@ -70,66 +67,59 @@ async def login(page):
 
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page.wait_for_timeout(3000)
-    log(f"STEP 4 - Logged in, URL={page.url}")
+    log(f"LOGIN DONE - {page.url}")
 
-async def open_shifts_page(page):
-    log("STEP 5 - Go to staff page")
+async def get_monolith_frame(page):
+    log("Going to /staff to load monolith iframe")
     await page.goto(PARIM_URL + "/staff", wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(5000)
 
-    log("STEP 6 - Wait for monolith-iframe to exist in DOM")
-    try:
-        await page.wait_for_selector('#monolith-iframe', timeout=15000)
-        log("STEP 6 - iframe found!")
-    except Exception as e:
-        log(f"STEP 6 - iframe NOT found: {e}")
-        iframe_check = await page.evaluate("document.getElementById('monolith-iframe') ? 'exists' : 'missing'")
-        log(f"STEP 6 - iframe check via JS: {iframe_check}")
-        raise Exception("monolith-iframe not in DOM")
+    log(f"Frames after /staff: {[f.url for f in page.frames]}")
 
-    log("STEP 7 - Set iframe src to Open Shifts")
-    open_url = PARIM_URL + "/s/event/index"
-    await page.evaluate(f"""
-        () => {{
-            const el = document.getElementById('monolith-iframe');
-            el.src = '{open_url}';
-        }}
-    """)
-    log(f"STEP 7 - iframe src set to {open_url}")
-
-    log("STEP 8 - Wait 12s for Open Shifts to load")
-    await page.wait_for_timeout(12000)
-    await page.screenshot(path="screenshot_01_open_shifts.png")
-
-    frames = page.frames
-    log(f"STEP 8 - Frames after wait: {[f.url for f in frames]}")
-
-    event_frame = None
-    for f in frames:
-        if "event" in f.url:
-            event_frame = f
-            log(f"STEP 8 - Event frame found: {f.url}")
+    monolith = None
+    for f in page.frames:
+        if "/s/" in f.url or "parim.co/s" in f.url:
+            monolith = f
+            log(f"Found monolith frame: {f.url}")
             break
 
-    if not event_frame and len(frames) > 1:
-        event_frame = frames[1]
-        log(f"STEP 8 - Using frame[1]: {event_frame.url}")
+    if not monolith and len(page.frames) > 1:
+        monolith = page.frames[1]
+        log(f"Using frames[1]: {monolith.url}")
 
-    return event_frame
+    if not monolith:
+        raise Exception("Could not find monolith frame")
 
-async def apply_shifts(frame, page, applied):
-    log("STEP 9 - Looking for Apply buttons in frame")
-    await asyncio.sleep(3)
+    return monolith
 
-    btns = await frame.query_selector_all('button:has-text("Apply")')
-    log(f"STEP 9 - Found {len(btns)} Apply button(s)")
+async def navigate_frame_to_open_shifts(monolith, page):
+    open_url = PARIM_URL + "/s/event/index"
+    log(f"Navigating FRAME directly to {open_url}")
+
+    # Use frame.goto() - the proper Playwright way!
+    await monolith.goto(open_url, wait_until="networkidle", timeout=20000)
+    await page.wait_for_timeout(5000)
+
+    log(f"Frame URL after goto: {monolith.url}")
+    await page.screenshot(path="screenshot_01_open_shifts.png")
+
+    content = await monolith.content()
+    log(f"Frame has Apply: {'Apply' in content}")
+    log(f"Frame has Available: {'Available' in content}")
+    return "Apply" in content or "Available" in content
+
+async def apply_shifts(monolith, page, applied):
+    count = 0
+    log("Looking for Apply buttons...")
+
+    btns = await monolith.query_selector_all('button:has-text("Apply")')
+    log(f"Found {len(btns)} Apply button(s)")
 
     if not btns:
-        snippet = await frame.evaluate("document.body?.innerHTML?.substring(0, 300) || 'empty'")
-        log(f"STEP 9 - Frame body: {snippet}")
+        snippet = await monolith.evaluate("document.body.innerText.substring(0, 300)")
+        log(f"Page text: {snippet}")
         return 0
 
-    count = 0
     for i, btn in enumerate(btns):
         try:
             if not await btn.is_visible():
@@ -144,10 +134,10 @@ async def apply_shifts(frame, page, applied):
                 text = f"shift_{i}"
 
             if text in applied:
-                log(f"STEP 10 - Shift {i+1} already applied, skipping")
+                log(f"Already applied - skipping shift {i+1}")
                 continue
 
-            log(f"STEP 10 - Applying shift {i+1}: {text[:60]}")
+            log(f"Applying shift {i+1}: {text[:80]}")
             await btn.scroll_into_view_if_needed()
             await btn.click()
             await asyncio.sleep(3)
@@ -162,9 +152,9 @@ async def apply_shifts(frame, page, applied):
                 '[role="dialog"] button:has-text("Apply")',
             ]:
                 try:
-                    mb = await frame.query_selector(sel)
+                    mb = await monolith.query_selector(sel)
                     if mb and await mb.is_visible():
-                        log(f"STEP 11 - Confirming via {sel}")
+                        log(f"Confirming via {sel}")
                         await mb.click()
                         await asyncio.sleep(3)
                         confirmed = True
@@ -176,24 +166,24 @@ async def apply_shifts(frame, page, applied):
                 applied.add(text)
                 save_applied(applied)
                 count += 1
-                log(f"STEP 11 - SUCCESS! Applied for shift {i+1}!")
+                log(f"SUCCESS! Applied for shift {i+1}!")
                 await page.screenshot(path=f"screenshot_03_done_{i}.png")
             else:
-                log(f"STEP 11 - Modal confirm not found for shift {i+1}")
+                log(f"No confirm button found for shift {i+1}")
 
         except Exception as e:
-            log(f"Error on shift {i+1}: {e}")
+            log(f"Error shift {i+1}: {e}")
 
     return count
 
 async def main():
     if not EMAIL or not PASSWORD:
-        log("ERROR: Secrets not set!")
+        log("Secrets not set!")
         sys.exit(1)
 
     log("=== PARiM Bot Starting ===")
     applied = load_applied()
-    log(f"History: {len(applied)} applied shifts")
+    log(f"History: {len(applied)} shifts")
 
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
@@ -208,14 +198,15 @@ async def main():
 
         try:
             await login(page)
-            frame = await open_shifts_page(page)
-            if frame:
-                n = await apply_shifts(frame, page, applied)
-                log(f"=== Applied for {n} shift(s) this run ===")
+            monolith = await get_monolith_frame(page)
+            ok = await navigate_frame_to_open_shifts(monolith, page)
+            if ok:
+                n = await apply_shifts(monolith, page, applied)
+                log(f"=== Applied for {n} shift(s) ===")
             else:
-                log("=== Could not get Open Shifts frame ===")
+                log("=== Open Shifts page did not load ===")
         except Exception as e:
-            log(f"=== FATAL: {e} ===")
+            log(f"=== ERROR: {e} ===")
             import traceback
             log(traceback.format_exc())
             try:
