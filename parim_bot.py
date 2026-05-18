@@ -10,9 +10,9 @@ PASSWORD = os.environ.get("PARIM_PASSWORD", "")
 PARIM_URL = os.environ.get("PARIM_URL", "https://swordsecurityhq.parim.co")
 APPLIED_FILE = Path("applied_shifts.json")
 
-def log(msg, icon="INFO"):
-    ts = datetime.utcnow().strftime("%H:%M:%S UTC")
-    print(f"[{ts}] {icon} {msg}", flush=True)
+def log(msg):
+    ts = datetime.utcnow().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 def load_applied():
     if APPLIED_FILE.exists():
@@ -26,25 +26,24 @@ def save_applied(applied):
     APPLIED_FILE.write_text(json.dumps(sorted(applied)))
 
 async def login(page):
-    login_url = PARIM_URL.rstrip("/") + "/login"
-    log(f"Step 1: Opening {login_url}")
-    await page.goto(login_url, wait_until="networkidle", timeout=40000)
+    log(f"STEP 1 - Login at {PARIM_URL}/login")
+    await page.goto(PARIM_URL + "/login", wait_until="networkidle", timeout=40000)
     await page.wait_for_timeout(3000)
 
     email_input = await page.wait_for_selector(
         'input[type="email"], input[name="email"], input[name="username"]', timeout=15000
     )
     await email_input.fill(EMAIL)
-    log("Step 2: Email entered")
+    log("STEP 2 - Email filled")
 
     next_btn = await page.query_selector('button:has-text("Next"), button:has-text("Continue")')
     if next_btn:
         await next_btn.click()
         await page.wait_for_timeout(3000)
         try:
-            first_item = await page.wait_for_selector('li, .team-item', timeout=5000)
-            if first_item:
-                await first_item.click()
+            item = await page.wait_for_selector('li, .team-item', timeout=5000)
+            if item:
+                await item.click()
                 await page.wait_for_timeout(3000)
         except Exception:
             pass
@@ -57,12 +56,11 @@ async def login(page):
                 break
         except Exception:
             continue
-
     if not pw_input:
-        raise Exception("Could not find password field")
+        raise Exception("Password field not found")
 
     await pw_input.fill(PASSWORD)
-    log("Step 3: Password entered")
+    log("STEP 3 - Password filled")
 
     btn = await page.query_selector('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in")')
     if btn:
@@ -71,80 +69,86 @@ async def login(page):
         await pw_input.press("Enter")
 
     await page.wait_for_load_state("networkidle", timeout=30000)
-    await page.wait_for_timeout(5000)
-    log(f"Step 4: Logged in! URL={page.url}")
+    await page.wait_for_timeout(3000)
+    log(f"STEP 4 - Logged in, URL={page.url}")
 
-async def get_open_shifts_frame(page):
-    staff_url = PARIM_URL.rstrip("/") + "/staff"
-    log(f"Step 5: Loading {staff_url}")
-    await page.goto(staff_url, wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(5000)
+async def open_shifts_page(page):
+    log("STEP 5 - Go to staff page")
+    await page.goto(PARIM_URL + "/staff", wait_until="networkidle", timeout=30000)
+    await page.wait_for_timeout(3000)
 
-    log(f"Step 6: Current frames: {[f.url for f in page.frames]}")
+    log("STEP 6 - Wait for monolith-iframe to exist in DOM")
+    try:
+        await page.wait_for_selector('#monolith-iframe', timeout=15000)
+        log("STEP 6 - iframe found!")
+    except Exception as e:
+        log(f"STEP 6 - iframe NOT found: {e}")
+        iframe_check = await page.evaluate("document.getElementById('monolith-iframe') ? 'exists' : 'missing'")
+        log(f"STEP 6 - iframe check via JS: {iframe_check}")
+        raise Exception("monolith-iframe not in DOM")
 
-    open_shifts_url = PARIM_URL.rstrip("/") + "/s/event/index"
-    log(f"Step 7: Setting iframe src to {open_shifts_url}")
-    await page.evaluate(f"document.getElementById('monolith-iframe').src = '{open_shifts_url}';")
+    log("STEP 7 - Set iframe src to Open Shifts")
+    open_url = PARIM_URL + "/s/event/index"
+    await page.evaluate(f"""
+        () => {{
+            const el = document.getElementById('monolith-iframe');
+            el.src = '{open_url}';
+        }}
+    """)
+    log(f"STEP 7 - iframe src set to {open_url}")
 
-    log("Step 8: Waiting for event frame to load (up to 20s)...")
+    log("STEP 8 - Wait 12s for Open Shifts to load")
+    await page.wait_for_timeout(12000)
+    await page.screenshot(path="screenshot_01_open_shifts.png")
+
+    frames = page.frames
+    log(f"STEP 8 - Frames after wait: {[f.url for f in frames]}")
+
     event_frame = None
-    for i in range(20):
-        await asyncio.sleep(1)
-        frames = page.frames
-        for f in frames:
-            if "event" in f.url or "event" in f.url.lower():
-                event_frame = f
-                log(f"Found event frame at attempt {i+1}: {f.url}")
-                break
-        if event_frame:
+    for f in frames:
+        if "event" in f.url:
+            event_frame = f
+            log(f"STEP 8 - Event frame found: {f.url}")
             break
-        if i % 5 == 0:
-            log(f"  Still waiting... frames: {[f.url for f in page.frames]}")
 
-    if not event_frame:
-        log("Event frame not found by URL - using frames[-1]")
-        log(f"All frames: {[f.url for f in page.frames]}")
-        if len(page.frames) > 1:
-            event_frame = page.frames[-1]
-            log(f"Using frame: {event_frame.url}")
+    if not event_frame and len(frames) > 1:
+        event_frame = frames[1]
+        log(f"STEP 8 - Using frame[1]: {event_frame.url}")
 
-    await page.screenshot(path="screenshot_01_state.png")
     return event_frame
 
-async def apply_via_frame(frame, page, applied):
-    count = 0
-    log(f"Step 9: Querying Apply buttons in frame {frame.url}")
-    await asyncio.sleep(5)
+async def apply_shifts(frame, page, applied):
+    log("STEP 9 - Looking for Apply buttons in frame")
+    await asyncio.sleep(3)
 
-    apply_btns = await frame.query_selector_all('button:has-text("Apply")')
-    log(f"Step 10: Found {len(apply_btns)} Apply buttons in frame")
+    btns = await frame.query_selector_all('button:has-text("Apply")')
+    log(f"STEP 9 - Found {len(btns)} Apply button(s)")
 
-    if not apply_btns:
-        html_snippet = await frame.evaluate("document.body.innerHTML.substring(0, 500)")
-        log(f"Frame body snippet: {html_snippet}")
+    if not btns:
+        snippet = await frame.evaluate("document.body?.innerHTML?.substring(0, 300) || 'empty'")
+        log(f"STEP 9 - Frame body: {snippet}")
         return 0
 
-    for i, btn in enumerate(apply_btns):
+    count = 0
+    for i, btn in enumerate(btns):
         try:
-            visible = await btn.is_visible()
-            log(f"Button {i+1}: visible={visible}")
-            if not visible:
+            if not await btn.is_visible():
                 continue
 
             try:
                 row = await btn.evaluate_handle(
                     "el => el.closest('tr') || el.closest('[class*=row]') || el.parentElement?.parentElement"
                 )
-                text = (await row.inner_text()).strip()
+                text = (await row.inner_text()).strip()[:200]
             except Exception:
                 text = f"shift_{i}"
 
-            shift_id = text[:200]
-            if shift_id in applied:
-                log(f"Already applied - skipping")
+            if text in applied:
+                log(f"STEP 10 - Shift {i+1} already applied, skipping")
                 continue
 
-            log(f"Step 11: Clicking Apply for: {text[:80]}...")
+            log(f"STEP 10 - Applying shift {i+1}: {text[:60]}")
+            await btn.scroll_into_view_if_needed()
             await btn.click()
             await asyncio.sleep(3)
             await page.screenshot(path=f"screenshot_02_modal_{i}.png")
@@ -153,14 +157,14 @@ async def apply_via_frame(frame, page, applied):
             for sel in [
                 '.modal-footer .btn-success',
                 '.modal-footer button:last-child',
-                '.modal button.btn-success',
-                '[role="dialog"] button:has-text("Apply")',
+                '.modal .btn-success',
                 '.modal button:has-text("Apply")',
+                '[role="dialog"] button:has-text("Apply")',
             ]:
                 try:
                     mb = await frame.query_selector(sel)
                     if mb and await mb.is_visible():
-                        log(f"Clicking modal confirm via: {sel}")
+                        log(f"STEP 11 - Confirming via {sel}")
                         await mb.click()
                         await asyncio.sleep(3)
                         confirmed = True
@@ -169,13 +173,13 @@ async def apply_via_frame(frame, page, applied):
                     continue
 
             if confirmed:
-                applied.add(shift_id)
+                applied.add(text)
                 save_applied(applied)
                 count += 1
-                log(f"SUCCESS! Applied for shift {i+1}!")
-                await page.screenshot(path=f"screenshot_03_success_{i}.png")
+                log(f"STEP 11 - SUCCESS! Applied for shift {i+1}!")
+                await page.screenshot(path=f"screenshot_03_done_{i}.png")
             else:
-                log(f"Could not find confirm button for shift {i+1}")
+                log(f"STEP 11 - Modal confirm not found for shift {i+1}")
 
         except Exception as e:
             log(f"Error on shift {i+1}: {e}")
@@ -184,42 +188,34 @@ async def apply_via_frame(frame, page, applied):
 
 async def main():
     if not EMAIL or not PASSWORD:
-        log("PARIM_EMAIL or PARIM_PASSWORD not set!")
+        log("ERROR: Secrets not set!")
         sys.exit(1)
 
-    log("=== PARiM Auto-Apply Bot Starting ===")
+    log("=== PARiM Bot Starting ===")
     applied = load_applied()
-    log(f"History: {len(applied)} previously applied shifts")
+    log(f"History: {len(applied)} applied shifts")
 
     from playwright.async_api import async_playwright
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                  "--disable-web-security", "--allow-running-insecure-content"]
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
-        context = await browser.new_context(
+        page = await (await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800}
-        )
-        page = await context.new_page()
+        )).new_page()
 
         try:
             await login(page)
-            frame = await get_open_shifts_frame(page)
-
+            frame = await open_shifts_page(page)
             if frame:
-                n = await apply_via_frame(frame, page, applied)
-                if n:
-                    log(f"=== SUCCESS: Applied for {n} shift(s)! ===")
-                else:
-                    log("=== Done: No new shifts to apply for ===")
+                n = await apply_shifts(frame, page, applied)
+                log(f"=== Applied for {n} shift(s) this run ===")
             else:
-                log("=== ERROR: Could not find Open Shifts frame ===")
-
+                log("=== Could not get Open Shifts frame ===")
         except Exception as e:
-            log(f"=== FATAL ERROR: {e} ===")
+            log(f"=== FATAL: {e} ===")
             import traceback
             log(traceback.format_exc())
             try:
