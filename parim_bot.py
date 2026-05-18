@@ -64,76 +64,113 @@ async def login(page):
     else:
         await pw_input.press("Enter")
 
-    # Wait for redirect to /staff - use load not networkidle
     await page.wait_for_load_state("load", timeout=30000)
     await page.wait_for_timeout(5000)
     log(f"Logged in! URL={page.url}")
 
-async def ensure_on_staff(page):
-    """Make sure we are on the /staff page. Already there after login — just wait."""
-    if "/staff" not in page.url:
-        log(f"Not on /staff (on {page.url}), navigating...")
-        await page.goto(PARIM_URL + "/staff", wait_until="load", timeout=30000)
-        await page.wait_for_timeout(5000)
-    else:
-        log("Already on /staff - waiting for iframe to render...")
-        await page.wait_for_timeout(6000)
+async def find_apply_elements(frame):
+    """Find Apply elements - could be <a>, <button>, or <input>"""
+    # Log what selectors find
+    results = await frame.evaluate("""
+        () => {
+            const selectors = [
+                'button:contains("Apply")',
+                'a.btn',
+                '.btn-success',
+                '.btn-primary',
+                'a[href*="apply"]',
+                'a[href*="application"]',
+                'input[value="Apply"]',
+            ];
+            const allElements = Array.from(document.querySelectorAll('a, button, input[type=button], input[type=submit]'));
+            const withApply = allElements.filter(el => {
+                const text = el.textContent || el.value || '';
+                return text.trim().toLowerCase() === 'apply';
+            });
+            return {
+                totalLinks: document.querySelectorAll('a').length,
+                totalButtons: document.querySelectorAll('button').length,
+                applyElements: withApply.map(el => ({
+                    tag: el.tagName,
+                    text: el.textContent || el.value,
+                    href: el.href || '',
+                    classes: el.className,
+                    visible: el.offsetParent !== null
+                }))
+            };
+        }
+    """)
+    return results
 
-    log(f"Staff page ready. Frames: {[f.url for f in page.frames]}")
-    await page.screenshot(path="screenshot_01_staff.png")
+async def click_apply_and_confirm(frame, page, i, text, applied):
+    """Click an Apply element and confirm the modal"""
+    # Click the Apply element
+    clicked = await frame.evaluate(f"""
+        () => {{
+            const allElements = Array.from(document.querySelectorAll('a, button, input[type=button], input[type=submit]'));
+            const applyEls = allElements.filter(el => {{
+                const txt = el.textContent || el.value || '';
+                return txt.trim().toLowerCase() === 'apply' && el.offsetParent;
+            }});
+            if (applyEls[{i}]) {{
+                applyEls[{i}].click();
+                return 'clicked ' + applyEls[{i}].tagName + ' ' + applyEls[{i}].className;
+            }}
+            return 'not found at index {i}';
+        }}
+    """)
+    log(f"  Click result: {clicked}")
 
-async def try_apply(target, page, applied):
-    btns = await target.query_selector_all('button:has-text("Apply")')
-    log(f"Apply buttons: {len(btns)}")
-    count = 0
-    for i, btn in enumerate(btns):
-        try:
-            if not await btn.is_visible():
-                continue
-            try:
-                row = await btn.evaluate_handle(
-                    "el => el.closest('tr') || el.closest('[class*=row]') || el.parentElement?.parentElement"
-                )
-                text = (await row.inner_text()).strip()[:200]
-            except Exception:
-                text = f"shift_{i}"
+    if 'clicked' not in clicked:
+        return False
 
-            if text in applied:
-                log(f"Already applied shift {i+1}")
-                continue
+    await asyncio.sleep(3)
+    await page.screenshot(path=f"screenshot_modal_{i}.png")
 
-            log(f"Applying shift {i+1}: {text[:60]}")
-            await btn.scroll_into_view_if_needed()
-            await btn.click()
-            await asyncio.sleep(3)
-            await page.screenshot(path=f"screenshot_modal_{i}.png")
+    # Confirm the modal - try multiple selectors
+    confirmed = await frame.evaluate("""
+        () => {
+            // Look for modal confirm button
+            const modalSelectors = [
+                '.modal-footer .btn-success',
+                '.modal-footer a.btn-success',
+                '.modal-footer button.btn-success',
+                '.modal .btn-success',
+                '.modal a:last-child',
+                '.modal button:last-child',
+                '[data-dismiss="modal"] ~ a',
+                '.modal-footer a:last-child',
+            ];
+            for (const sel of modalSelectors) {
+                const btn = document.querySelector(sel);
+                if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    return 'confirmed via ' + sel;
+                }
+            }
+            // Fallback: find any visible element with Apply text in modal area
+            const modal = document.querySelector('.modal.in, .modal[style*="block"], .modal[aria-hidden="false"]');
+            if (modal) {
+                const els = Array.from(modal.querySelectorAll('a, button'));
+                const applyEl = els.find(el => (el.textContent || '').trim().toLowerCase() === 'apply' && el.offsetParent);
+                if (applyEl) { applyEl.click(); return 'confirmed via modal search'; }
+            }
+            // Last resort: any visible Apply element
+            const all = Array.from(document.querySelectorAll('a, button'));
+            const visible = all.find(el => (el.textContent || '').trim().toLowerCase() === 'apply' && el.offsetParent);
+            if (visible) { visible.click(); return 'confirmed via visible'; }
+            return 'not found';
+        }
+    """)
+    log(f"  Confirm result: {confirmed}")
 
-            confirmed = False
-            for sel in ['.modal-footer .btn-success', '.modal-footer button:last-child',
-                        '.modal .btn-success', '.modal button:has-text("Apply")',
-                        '[role="dialog"] button:has-text("Apply")', 'button.btn-success']:
-                try:
-                    mb = await target.query_selector(sel)
-                    if mb and await mb.is_visible():
-                        log(f"Confirming via {sel}")
-                        await mb.click()
-                        await asyncio.sleep(3)
-                        confirmed = True
-                        break
-                except Exception:
-                    continue
-
-            if confirmed:
-                applied.add(text)
-                save_applied(applied)
-                count += 1
-                log(f"SUCCESS! Applied shift {i+1}")
-                await page.screenshot(path=f"screenshot_done_{i}.png")
-            else:
-                log(f"No confirm button found for shift {i+1}")
-        except Exception as e:
-            log(f"Error shift {i+1}: {e}")
-    return count
+    await asyncio.sleep(3)
+    if 'confirmed' in confirmed:
+        applied.add(text)
+        save_applied(applied)
+        await page.screenshot(path=f"screenshot_done_{i}.png")
+        return True
+    return False
 
 async def main():
     if not EMAIL or not PASSWORD:
@@ -157,90 +194,56 @@ async def main():
 
         try:
             await login(page)
-            await ensure_on_staff(page)
+
+            # Already on /staff after login - just wait
+            if "/staff" not in page.url:
+                await page.goto(PARIM_URL + "/staff", wait_until="load", timeout=30000)
+            await page.wait_for_timeout(6000)
+            log(f"Staff page. Frames: {[f.url for f in page.frames]}")
+
+            # Find monolith frame
+            mf = None
+            for f in page.frames:
+                if "/s/" in f.url:
+                    mf = f
+                    break
+            if not mf and len(page.frames) > 1:
+                mf = page.frames[1]
+            log(f"Monolith frame: {mf.url if mf else 'NOT FOUND'}")
+
+            if not mf:
+                raise Exception("No monolith frame found")
+
+            # Navigate frame to Open Shifts
+            log("Navigating frame to Open Shifts...")
+            await mf.goto(PARIM_URL + "/s/event/index", wait_until="load", timeout=20000)
+            await asyncio.sleep(8)  # Wait for AJAX/SPA to render
+            log(f"Frame URL: {mf.url}")
+            await page.screenshot(path="screenshot_01_open_shifts.png")
+
+            # Diagnose what Apply elements exist
+            info = await find_apply_elements(mf)
+            log(f"Links: {info['totalLinks']}, Buttons: {info['totalButtons']}")
+            log(f"Apply elements found: {info['applyElements']}")
 
             total = 0
+            apply_els = [el for el in info['applyElements'] if el.get('visible')]
+            log(f"Visible Apply elements: {len(apply_els)}")
 
-            # METHOD A: frame.goto() on monolith frame
-            log("--- METHOD A: frame.goto ---")
-            try:
-                mf = None
-                for f in page.frames:
-                    if "/s/" in f.url:
-                        mf = f
-                        break
-                if not mf and len(page.frames) > 1:
-                    mf = page.frames[1]
-
-                log(f"Frame: {mf.url if mf else 'not found'}")
-                if mf:
-                    await mf.goto(PARIM_URL + "/s/event/index", wait_until="load", timeout=20000)
-                    await asyncio.sleep(5)
-                    log(f"Frame URL after goto: {mf.url}")
-                    await page.screenshot(path="screenshot_02_frame.png")
-                    content = await mf.content()
-                    log(f"Frame has Apply: {'Apply' in content}, Open Shifts: {'Open Shifts' in content}")
-                    n = await try_apply(mf, page, applied)
-                    total += n
-            except Exception as e:
-                log(f"Method A error: {e}")
-
-            # METHOD B: contentDocument if A found nothing
-            if total == 0:
-                log("--- METHOD B: contentDocument ---")
-                try:
-                    # Navigate iframe via JS
-                    await page.evaluate(
-                        f"document.getElementById('monolith-iframe').src = '{PARIM_URL}/s/event/index'"
-                    )
-                    await asyncio.sleep(10)
-                    await page.screenshot(path="screenshot_03_contentdoc.png")
-
-                    info = await page.evaluate("""
-                        () => {
-                            try {
-                                const doc = document.getElementById('monolith-iframe').contentDocument
-                                            || document.getElementById('monolith-iframe').contentWindow.document;
-                                const applyBtns = Array.from(doc.querySelectorAll('button'))
-                                    .filter(b => b.textContent.trim() === 'Apply' && b.offsetParent);
-                                return {count: applyBtns.length, text: doc.body.innerText.substring(0,100)};
-                            } catch(e) { return {error: e.message}; }
-                        }
-                    """)
-                    log(f"contentDocument: {info}")
-
-                    apply_count = info.get('count', 0) if isinstance(info, dict) else 0
-                    for i in range(apply_count):
-                        r = await page.evaluate("""
-                            () => {
-                                const doc = document.getElementById('monolith-iframe').contentDocument
-                                            || document.getElementById('monolith-iframe').contentWindow.document;
-                                const btn = Array.from(doc.querySelectorAll('button'))
-                                    .find(b => b.textContent.trim() === 'Apply' && b.offsetParent);
-                                if (btn) { btn.click(); return 'clicked'; }
-                                return 'not found';
-                            }
-                        """)
-                        log(f"Click: {r}")
-                        if r == 'clicked':
-                            await asyncio.sleep(3)
-                            c = await page.evaluate("""
-                                () => {
-                                    const doc = document.getElementById('monolith-iframe').contentDocument
-                                                || document.getElementById('monolith-iframe').contentWindow.document;
-                                    const mb = doc.querySelector('.modal-footer .btn-success, .modal .btn-success');
-                                    if (mb && mb.offsetParent) { mb.click(); return 'confirmed'; }
-                                    return 'not found';
-                                }
-                            """)
-                            log(f"Confirm: {c}")
-                            if 'confirmed' in str(c):
-                                total += 1
-                                log(f"SUCCESS via Method B!")
-                                await page.screenshot(path=f"screenshot_done_b_{i}.png")
-                            await asyncio.sleep(3)
-                except Exception as e:
-                    log(f"Method B error: {e}")
+            for i, el_info in enumerate(apply_els):
+                shift_text = f"apply_{i}_{el_info.get('href', '')}"
+                if shift_text in applied:
+                    log(f"Shift {i+1} already applied")
+                    continue
+                log(f"Applying shift {i+1}: tag={el_info['tag']} class={el_info['classes'][:40]}")
+                success = await click_apply_and_confirm(mf, page, i, shift_text, applied)
+                if success:
+                    total += 1
+                    log(f"SUCCESS! Applied shift {i+1}!")
+                # Re-query after each apply since DOM changes
+                await asyncio.sleep(2)
+                info = await find_apply_elements(mf)
+                apply_els = [el for el in info['applyElements'] if el.get('visible')]
 
             log(f"=== Done. Applied for {total} shift(s) ===")
 
